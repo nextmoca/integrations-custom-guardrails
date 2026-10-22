@@ -21,6 +21,7 @@ Each `integrations/<vendor>/` directory is a standard FastAPI Docker container t
 | [`integrations/arthur-ai/`](integrations/arthur-ai/) | [Arthur GenAI Engine](https://platform.arthur.ai) stateless validation API (SaaS) | `/validate-input`, `/validate-output` |
 | [`integrations/verra/`](integrations/verra/) | [Verra](https://helloverra.com) managed AI governance (SaaS validate + mutate) | `/scan-input`, `/redact-input`, `/scan-output`, `/redact-output` |
 | [`integrations/hiddenlayer/`](integrations/hiddenlayer/) | [HiddenLayer AISec](https://hiddenlayer.com) Detection v2 API (validate + inline redact) | `/validate-input`, `/validate-output`, `/redact-input`, `/redact-output` |
+| [`integrations/next-moca/`](integrations/next-moca/) | [Next Moca](https://nextmoca.com) context selection for tool results (SaaS mutate) | `/select-input` |
 
 Each integration ships with its own `deploy.py` (a TrueFoundry Python SDK example) that prints the resolved public URL after a successful run. Use it as-is, swap it for your own deploy step (ECS task, Cloud Run service, Kubernetes manifest, etc.), or skip it entirely — the URL is what matters, not the hosting path.
 
@@ -47,7 +48,8 @@ tfy-custom-guardrails/
     ├── coreweave-weave/            CoreWeave Weave scorers wrapper (Celadon toxicity)
     ├── arthur-ai/                  Arthur GenAI Engine validate API wrapper (SaaS)
     ├── verra/                      Verra managed AI governance wrapper (SaaS)
-    └── hiddenlayer/                HiddenLayer AISec Runtime Security wrapper (SaaS)
+    ├── hiddenlayer/                HiddenLayer AISec Runtime Security wrapper (SaaS)
+    └── next-moca/                  Next Moca context selection for tool results (SaaS)
 ```
 
 ## Design principle
