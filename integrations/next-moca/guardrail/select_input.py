@@ -77,20 +77,58 @@ def _passthrough(body: dict, settings: Optional[nm.Settings], message: Optional[
     return MutateGuardrailResponse(verdict=True, transformed=False, result=copy.deepcopy(body))
 
 
-async def _select_all(slots: list[ToolSlot], task_prompt: str, settings: nm.Settings) -> list[nm.Decision]:
+# One connection pool for the life of the service (opened and closed by the app lifespan).
+_shared_client: Optional[httpx.AsyncClient] = None
+
+
+async def open_client() -> None:
+    global _shared_client
+    if _shared_client is None:
+        _shared_client = httpx.AsyncClient(limits=httpx.Limits(max_connections=nm.MAX_SERVICE_CONNECTIONS))
+
+
+async def close_client() -> None:
+    global _shared_client
+    if _shared_client is not None:
+        await _shared_client.aclose()
+        _shared_client = None
+
+
+async def _select_with(
+    client: httpx.AsyncClient, slots: list[ToolSlot], task_prompt: str, settings: nm.Settings
+) -> list[nm.Decision]:
+    """All calls for one request finish inside `timeout_ms`, queueing included.
+
+    A call still running at the deadline is cancelled and its tool result is kept.
+    """
     key = nm.api_key()
     url = nm.api_base() + nm.ENDPOINT_PATH
     semaphore = asyncio.Semaphore(nm.MAX_CONCURRENT_CALLS)
 
+    async def run(text: str) -> nm.Decision:
+        async with semaphore:
+            return await nm.select_one(client, url=url, key=key, text=text, task_prompt=task_prompt, settings=settings)
+
+    tasks = [asyncio.create_task(run(text)) for _, text in slots]
+    _, pending = await asyncio.wait(tasks, timeout=settings.timeout_ms / 1000.0)
+    for task in pending:
+        task.cancel()
+    decisions: list[nm.Decision] = []
+    for task in tasks:
+        if task in pending or task.cancelled():
+            decisions.append(nm.Decision(nm.DECISION_PASSTHROUGH, "timeout"))
+        elif task.exception() is not None:
+            decisions.append(nm.Decision(nm.DECISION_PASSTHROUGH, f"error:{type(task.exception()).__name__}"))
+        else:
+            decisions.append(task.result())
+    return decisions
+
+
+async def _select_all(slots: list[ToolSlot], task_prompt: str, settings: nm.Settings) -> list[nm.Decision]:
+    if _shared_client is not None:
+        return await _select_with(_shared_client, slots, task_prompt, settings)
     async with httpx.AsyncClient() as client:
-
-        async def run(text: str) -> nm.Decision:
-            async with semaphore:
-                return await nm.select_one(
-                    client, url=url, key=key, text=text, task_prompt=task_prompt, settings=settings
-                )
-
-        return list(await asyncio.gather(*(run(text) for _, text in slots)))
+        return await _select_with(client, slots, task_prompt, settings)
 
 
 def _shadow_message(decisions: list[nm.Decision]) -> str:

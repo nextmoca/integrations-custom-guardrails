@@ -27,14 +27,17 @@ from __future__ import annotations
 import hmac
 import logging
 import os
+from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 load_dotenv()
 
 from guardrail import _next_moca_client as nm  # noqa: E402
-from guardrail.select_input import select_input  # noqa: E402
+from guardrail.select_input import close_client, open_client, select_input  # noqa: E402
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "info").upper(),
@@ -81,11 +84,29 @@ if not _auth_is_configured():
         log.error("WRAPPER_API_KEY unset or placeholder: rail and debug routes return 503")
 
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    await open_client()
+    try:
+        yield
+    finally:
+        await close_client()
+
+
 app = FastAPI(
     title="next-moca-guardrails-tfy",
     description="Next Moca context selection for tool results, behind the TrueFoundry custom-guardrail contract.",
     version="1.0.0",
+    lifespan=lifespan,
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    """A malformed gateway envelope is an infrastructure error (non-2xx). The body names
+    the failing fields only and never echoes request content."""
+    fields = sorted({".".join(str(p) for p in e.get("loc", ())) for e in exc.errors()})
+    return JSONResponse(status_code=422, content={"error": "invalid guardrail request", "fields": fields})
 
 
 @app.get("/")

@@ -39,12 +39,14 @@ DEFAULT_MAX_CONTEXT_TOKENS = 4000
 DEFAULT_MIN_TOKENS = 1500
 DEFAULT_TIMEOUT_MS = 3000
 
-# Bounds. The timeout stays under the gateway's default 10 s guardrail timeout.
+# Bounds. `timeout_ms` is the deadline for all calls of one gateway request, and its
+# ceiling leaves margin under the gateway's default 10 s guardrail timeout.
 MIN_TIMEOUT_MS = 100
-MAX_TIMEOUT_MS = 9000
+MAX_TIMEOUT_MS = 8000
 MIN_MAX_CONTEXT_TOKENS = 256
 MAX_MAX_CONTEXT_TOKENS = 128_000
-MAX_CONCURRENT_CALLS = 8
+MAX_CONCURRENT_CALLS = 8  # per gateway request
+MAX_SERVICE_CONNECTIONS = 64  # per service process
 
 # Outcomes on which the server delivered a packet that replaces the tool result.
 DELIVERY_OUTCOMES = ("engaged", "sanitized_fallback", "blocked")

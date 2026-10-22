@@ -27,6 +27,8 @@ For every message with `role: "tool"` in `requestBody.messages`:
    - `blocked` (nothing deliverable remained; the server's placeholder is applied, and the call is not denied).
 4. On any other outcome (for example `stood_down` or `escalated`), on an empty render, a malformed response, any non-2xx status, a timeout or a connection error, the original tool result is kept.
 
+Each tool result is handled on its own: when one call fails and another returns a delivery, the delivery is applied and the failed one keeps its original text. A screened delivery is never discarded because a different call failed.
+
 System, user and assistant messages, `tool_call_id`, and every other field of the request body (`model`, `stream`, `tools`, sampling parameters) are returned unchanged. Requests without tool messages, or without a user message, make no call.
 
 Fail open: any error inside the wrapper or from Next Moca returns `{"verdict": true, "transformed": false, "result": <original requestBody>}`, so the request continues unchanged.
@@ -48,7 +50,7 @@ TrueFoundry also exposes `mcp_tool_pre_invoke` and `mcp_tool_post_invoke` hooks.
 | `operating_point` | `np-2026-10-r7` | Next Moca operating point label. `np-2026-10-r7` adds screening for planted instructions; see [Operating points](https://docs.nextmoca.com/concepts/operating-points). |
 | `max_context_tokens` | `4000` | Token allowance for the context returned per tool result. |
 | `min_tokens` | `1500` | Tool results under this estimated size are not sent. Set `0` to send every tool result, for example when screening matters more than call volume. |
-| `timeout_ms` | `3000` | Per-call timeout. Clamped to 100 to 9000 ms so it stays inside the gateway's 10 s guardrail timeout. |
+| `timeout_ms` | `3000` | Deadline for all Next Moca calls of one gateway request, queueing included. A call still running at the deadline is cancelled and its tool result is kept. Clamped to 100 to 8000 ms so it stays inside the gateway's 10 s guardrail timeout. |
 | `validate_only` | `false` | Never transform; return the selection ids in `message`. Use with Operation: Validate. |
 
 Example:
