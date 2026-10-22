@@ -5,9 +5,11 @@ This module is a transport. It sends one tool result and the task to
 use in its place. It never splits, scores, ranks or rewrites text itself: the
 only text it ever hands back is the server's `rendered_context`, unchanged.
 
-Server-side settings (API key, base URL) come from the service environment
-only. The per-request `config` relayed by the gateway is not a trust boundary,
-so nothing in it can redirect traffic or supply a credential.
+The API base URL comes from the service environment only. The key is passed in
+per call by the caller (forwarded from the gateway's bearer, or the service's
+own key in self-hosted mode) and is never stored here. The per-request `config`
+relayed by the gateway is not a trust boundary, so nothing in it can redirect
+traffic or supply a credential.
 """
 
 from __future__ import annotations
@@ -37,6 +39,9 @@ USER_AGENT = "next-moca-truefoundry-guardrail/1.0.0"
 DEFAULT_OPERATING_POINT = "np-2026-10-r7"
 DEFAULT_MAX_CONTEXT_TOKENS = 4000
 DEFAULT_MIN_TOKENS = 1500
+DEFAULT_MIN_TOKENS_SECURITY = 0  # on a security operating point every tool result is sent
+SECURITY_OPERATING_POINTS = frozenset({"np-2026-10-r7"})
+SECURITY_OPERATING_POINT_SUFFIX = "r7s-candidate"
 DEFAULT_TIMEOUT_MS = 3000
 
 # Bounds. `timeout_ms` is the deadline for all calls of one gateway request, and its
@@ -109,6 +114,14 @@ def _bool_setting(config: dict[str, Any], key: str, default: bool) -> bool:
     return default
 
 
+def is_security_operating_point(label: str) -> bool:
+    return label in SECURITY_OPERATING_POINTS or label.endswith(SECURITY_OPERATING_POINT_SUFFIX)
+
+
+def default_min_tokens(operating_point: str) -> int:
+    return DEFAULT_MIN_TOKENS_SECURITY if is_security_operating_point(operating_point) else DEFAULT_MIN_TOKENS
+
+
 def resolve_settings(config: Optional[dict[str, Any]]) -> Settings:
     """Read the documented fields from the gateway `config`. Unknown keys are ignored.
 
@@ -118,18 +131,20 @@ def resolve_settings(config: Optional[dict[str, Any]]) -> Settings:
     operating_point = cfg.get("operating_point")
     if not isinstance(operating_point, str) or not operating_point.strip():
         operating_point = DEFAULT_OPERATING_POINT
+    operating_point = operating_point.strip()
     return Settings(
-        operating_point=operating_point.strip(),
+        operating_point=operating_point,
         max_context_tokens=_int_setting(
             cfg, "max_context_tokens", DEFAULT_MAX_CONTEXT_TOKENS, MIN_MAX_CONTEXT_TOKENS, MAX_MAX_CONTEXT_TOKENS
         ),
-        min_tokens=_int_setting(cfg, "min_tokens", DEFAULT_MIN_TOKENS, 0, 10_000_000),
+        min_tokens=_int_setting(cfg, "min_tokens", default_min_tokens(operating_point), 0, 10_000_000),
         timeout_ms=_int_setting(cfg, "timeout_ms", DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS),
         validate_only=_bool_setting(cfg, "validate_only", False),
     )
 
 
 def api_key() -> str:
+    """The service's own key (self-hosted mode only)."""
     return os.environ.get(ENV_API_KEY, "").strip()
 
 

@@ -33,13 +33,25 @@ System, user and assistant messages, `tool_call_id`, and every other field of th
 
 Fail open: any error inside the wrapper or from Next Moca returns `{"verdict": true, "transformed": false, "result": <original requestBody>}`, so the request continues unchanged.
 
-The gateway resends the full conversation on every turn, so every tool message in the history is sent on every call, and each one is screened each time it reaches the model.
+The gateway resends the full conversation on every turn, so in this version every tool message in the history is sent to Next Moca again on each call.
 
 `stream: true` has no effect on this rail: it runs on the request, before the model is called. (TrueFoundry skips output guardrails on streamed responses; this integration has no output rail.)
 
 ### MCP tool hooks
 
 TrueFoundry also exposes `mcp_tool_pre_invoke` and `mcp_tool_post_invoke` hooks. The request body a custom guardrail receives on those hooks is not published in the TrueFoundry docs, so this integration ships the `llm_input` rail only. MCP tool results that an agent passes back to the model arrive on the next `llm_input` call as `role: "tool"` messages, and are handled there.
+
+## Two ways to run it
+
+| | Forwarded key (one hosted endpoint) | Self-hosted |
+|---|---|---|
+| Who runs the container | Next Moca, one endpoint for many customers | You, on any runtime with a public HTTPS URL |
+| `WRAPPER_API_KEY` on the service | unset | set |
+| What goes in TrueFoundry **Auth Data > Custom Bearer Auth** | your own Next Moca API key | the `WRAPPER_API_KEY` value |
+| Where the Next Moca key comes from | the `Authorization: Bearer` header of each gateway call, forwarded to Next Moca for that call only | `NEXT_MOCA_API_KEY` on the service |
+| No usable key | request passes through unchanged, no call | wrong or missing bearer: 401; no `NEXT_MOCA_API_KEY`: passes through unchanged |
+
+In forwarded-key mode the key is never logged, echoed in a response or error, stored, or cached beyond the request. A call without a bearer key never uses a key held by the service. Mint a key at [console.nextmoca.com](https://console.nextmoca.com).
 
 ## Configuration
 
@@ -49,14 +61,14 @@ TrueFoundry also exposes `mcp_tool_pre_invoke` and `mcp_tool_post_invoke` hooks.
 |---|---|---|
 | `operating_point` | `np-2026-10-r7` | Next Moca operating point label. `np-2026-10-r7` adds screening for planted instructions; see [Operating points](https://docs.nextmoca.com/concepts/operating-points). |
 | `max_context_tokens` | `4000` | Token allowance for the context returned per tool result. |
-| `min_tokens` | `1500` | Tool results under this estimated size are not sent. Set `0` to send every tool result, for example when screening matters more than call volume. |
+| `min_tokens` | `0` on a security operating point (`np-2026-10-r7`, or a label ending in `r7s-candidate`), `1500` otherwise | Tool results under this estimated size are not sent. An explicit value always wins. |
 | `timeout_ms` | `3000` | Deadline for all Next Moca calls of one gateway request, queueing included. A call still running at the deadline is cancelled and its tool result is kept. Clamped to 100 to 8000 ms so it stays inside the gateway's 10 s guardrail timeout. |
 | `validate_only` | `false` | Never transform; return the selection ids in `message`. Use with Operation: Validate. |
 
 Example:
 
 ```json
-{"operating_point": "np-2026-10-r7", "max_context_tokens": 4000, "min_tokens": 1500, "timeout_ms": 3000}
+{"operating_point": "np-2026-10-r7", "max_context_tokens": 4000, "timeout_ms": 3000}
 ```
 
 Credentials and the API host are never read from `config`.
@@ -65,10 +77,10 @@ Credentials and the API host are never read from `config`.
 
 | Variable | Required | Description |
 |---|---|---|
-| `NEXT_MOCA_API_KEY` | yes | Next Moca API key. Sign up and mint one at [console.nextmoca.com](https://console.nextmoca.com). Without it the rail passes every request through unchanged. |
-| `WRAPPER_API_KEY` | yes | Bearer token the gateway sends (Custom Bearer Auth). If unset, the rail returns 503. |
+| `WRAPPER_API_KEY` | self-hosted only | Bearer token the gateway sends (Custom Bearer Auth). Set: self-hosted mode. Unset: forwarded-key mode. |
+| `NEXT_MOCA_API_KEY` | self-hosted only | The service's Next Moca key, used only in self-hosted mode. Do not set it on a forwarded-key deployment. |
 | `NEXT_MOCA_API_BASE` | no | Default `https://api.nextmoca.com`. Must be `https://`. |
-| `ALLOW_NO_AUTH` | no | `true` serves the rail without bearer auth. Local development only. |
+| `ALLOW_NO_AUTH` | no | `true` lets a call without any bearer use `NEXT_MOCA_API_KEY` in forwarded-key mode. Local development only. |
 | `LOG_LEVEL` | no | Default `info`. Logs carry decisions, outcomes and selection ids, never message text or keys. |
 
 ## Quick start
@@ -77,7 +89,7 @@ Credentials and the API host are never read from `config`.
 cd integrations/next-moca
 python3 -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt
-cp .env.example .env   # fill in NEXT_MOCA_API_KEY and WRAPPER_API_KEY
+cp .env.example .env   # self-hosted: fill in NEXT_MOCA_API_KEY and WRAPPER_API_KEY
 .venv/bin/uvicorn main:app --reload --port 8000
 ```
 
@@ -87,7 +99,7 @@ cp .env.example .env   # fill in NEXT_MOCA_API_KEY and WRAPPER_API_KEY
 .venv/bin/pytest -v tests/
 ```
 
-The suite runs a fake Next Moca API (respx) behind the real HTTP client and covers: tool messages replaced on `engaged` and `sanitized_fallback`; `blocked` applied as rendered; passthrough on stand-down outcomes, empty renders, 4xx and 5xx, timeouts, connection errors and malformed bodies; no call under `min_tokens`, without tool messages, without a user message or without an API key; `verdict` always true; `validate_only` never transforming. One live test against the hosted API runs when `NEXT_MOCA_LIVE_API_KEY` is set.
+The suite runs a fake Next Moca API (respx) behind the real HTTP client and covers: tool messages replaced on `engaged` and `sanitized_fallback`; `blocked` applied as rendered; passthrough on stand-down outcomes, empty renders, 4xx and 5xx, timeouts, connection errors and malformed bodies; no call under `min_tokens`, without tool messages, without a user message or without a key; the forwarded key used as the bearer, the service key used only in self-hosted mode, and the forwarded key absent from every log record, response and error; `verdict` always true; `validate_only` never transforming. One live test against the hosted API runs when `NEXT_MOCA_LIVE_API_KEY` is set.
 
 ## Example
 
@@ -135,7 +147,7 @@ tfy login
 .venv/bin/python deploy.py --wait
 ```
 
-Store `NEXT_MOCA_API_KEY` and `WRAPPER_API_KEY` as TrueFoundry secrets and reference them via `NEXT_MOCA_API_KEY_SECRET_FQN` and `WRAPPER_API_KEY_SECRET_FQN` in `.env`.
+For a self-hosted deployment, store `NEXT_MOCA_API_KEY` and `WRAPPER_API_KEY` as TrueFoundry secrets and reference them via `NEXT_MOCA_API_KEY_SECRET_FQN` and `WRAPPER_API_KEY_SECRET_FQN` in `.env`.
 
 ## Register in the dashboard
 
@@ -144,7 +156,7 @@ Store `NEXT_MOCA_API_KEY` and `WRAPPER_API_KEY` as TrueFoundry secrets and refer
 - **URL**: `https://<host>/<path>/select-input`
 - **Hook**: LLM Input
 - **Operation**: Mutate (or Validate with `validate_only: true` for shadow measurement)
-- **Auth Data**: Custom Bearer Auth with the `WRAPPER_API_KEY` value
+- **Auth Data**: Custom Bearer Auth with your Next Moca API key (forwarded-key endpoint) or the `WRAPPER_API_KEY` value (self-hosted)
 - **Config**: see above
 - **Enforcing strategy**: Enforce But Ignore On Error
 

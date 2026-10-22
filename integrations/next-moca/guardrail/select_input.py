@@ -95,13 +95,12 @@ async def close_client() -> None:
 
 
 async def _select_with(
-    client: httpx.AsyncClient, slots: list[ToolSlot], task_prompt: str, settings: nm.Settings
+    client: httpx.AsyncClient, slots: list[ToolSlot], task_prompt: str, settings: nm.Settings, key: str
 ) -> list[nm.Decision]:
     """All calls for one request finish inside `timeout_ms`, queueing included.
 
     A call still running at the deadline is cancelled and its tool result is kept.
     """
-    key = nm.api_key()
     url = nm.api_base() + nm.ENDPOINT_PATH
     semaphore = asyncio.Semaphore(nm.MAX_CONCURRENT_CALLS)
 
@@ -131,11 +130,11 @@ async def _select_with(
     return decisions
 
 
-async def _select_all(slots: list[ToolSlot], task_prompt: str, settings: nm.Settings) -> list[nm.Decision]:
+async def _select_all(slots: list[ToolSlot], task_prompt: str, settings: nm.Settings, key: str) -> list[nm.Decision]:
     if _shared_client is not None:
-        return await _select_with(_shared_client, slots, task_prompt, settings)
+        return await _select_with(_shared_client, slots, task_prompt, settings, key)
     async with httpx.AsyncClient() as client:
-        return await _select_with(client, slots, task_prompt, settings)
+        return await _select_with(client, slots, task_prompt, settings, key)
 
 
 def _shadow_message(decisions: list[nm.Decision]) -> str:
@@ -147,7 +146,11 @@ def _shadow_message(decisions: list[nm.Decision]) -> str:
     return "Next Moca shadow: " + ", ".join(items)
 
 
-async def select_input(request: InputGuardrailRequest) -> Union[MutateGuardrailResponse, ValidateGuardrailResponse]:
+async def select_input(
+    request: InputGuardrailRequest, next_moca_key: Optional[str]
+) -> Union[MutateGuardrailResponse, ValidateGuardrailResponse]:
+    """`next_moca_key` is the key for this request only (forwarded or from the service
+    environment, resolved by the route). None means no call is made."""
     body = request.requestBody
     settings: Optional[nm.Settings] = None
     try:
@@ -164,11 +167,11 @@ async def select_input(request: InputGuardrailRequest) -> Union[MutateGuardrailR
         if task_prompt is None:
             return _passthrough(body, settings)
 
-        if not nm.api_key():
-            log.warning("%s is not set; passing the request through unchanged", nm.ENV_API_KEY)
+        if not next_moca_key:
+            log.info("no Next Moca key for this request; passing it through unchanged")
             return _passthrough(body, settings)
 
-        decisions = await _select_all(slots, task_prompt, settings)
+        decisions = await _select_all(slots, task_prompt, settings, next_moca_key)
         for (index, _), d in zip(slots, decisions):
             log.info(
                 "tool_message=%d decision=%s reason=%s outcome=%s selection_id=%s receipt=%s",

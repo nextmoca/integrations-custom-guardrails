@@ -10,11 +10,21 @@ Endpoints:
     GET  /health                 health check (open)
     POST /select-input           llm_input hook, Operation: Mutate
                                  (or Operation: Validate with config validate_only: true)
-    GET  /debug/loaded-config    bearer-auth gated diagnostics
+    GET  /debug/loaded-config    diagnostics (no secrets)
 
-A shared bearer token (WRAPPER_API_KEY) gates the rail and /debug. Configure the
-same token in the TrueFoundry dashboard under Custom Bearer Auth. The Next Moca
-API key is read from NEXT_MOCA_API_KEY on the service, never from the request.
+Two modes, chosen by WRAPPER_API_KEY:
+
+    Forwarded key (WRAPPER_API_KEY unset; one hosted endpoint for many customers).
+        Each customer puts their own Next Moca API key in the TrueFoundry guardrail
+        config under Auth Data > Custom Bearer Auth. The gateway sends it as
+        `Authorization: Bearer <key>` and the service forwards it to Next Moca for
+        that request only. It is never logged, echoed, stored or cached. A request
+        without a bearer key passes through unchanged and makes no call.
+
+    Self-hosted (WRAPPER_API_KEY set).
+        The gateway's bearer must equal WRAPPER_API_KEY (401 otherwise), and the
+        Next Moca key comes from NEXT_MOCA_API_KEY on the service. Without it,
+        requests pass through unchanged.
 
 Response contract:
     Mutate     -> HTTP 200 + {"verdict": true, "transformed": <bool>, "result": <requestBody>}
@@ -30,6 +40,9 @@ import os
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
+import re
+from typing import Optional, Union
+
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -37,6 +50,7 @@ from fastapi.responses import JSONResponse
 load_dotenv()
 
 from guardrail import _next_moca_client as nm  # noqa: E402
+from entities import InputGuardrailRequest, MutateGuardrailResponse, ValidateGuardrailResponse  # noqa: E402
 from guardrail.select_input import close_client, open_client, select_input  # noqa: E402
 
 logging.basicConfig(
@@ -57,31 +71,61 @@ def _allow_no_auth() -> bool:
     return os.environ.get("ALLOW_NO_AUTH", "").strip().lower() in ("1", "true", "yes")
 
 
-def _auth_is_configured() -> bool:
+def _self_hosted() -> bool:
+    """Self-hosted mode: WRAPPER_API_KEY is set to a real value."""
     key = _wrapper_api_key()
     return bool(key) and key not in _PLACEHOLDER_API_KEYS
 
 
-def require_bearer(request: Request) -> None:
-    """Bearer-auth dependency. Fails closed (503) when no real key is configured,
-    unless ALLOW_NO_AUTH=true is set for local development."""
-    if not _auth_is_configured():
-        if _allow_no_auth():
-            return
-        raise HTTPException(status_code=503, detail="wrapper authentication is not configured")
+# A bearer token that can be forwarded: printable ASCII, no spaces, bounded length.
+_FORWARDABLE_TOKEN = re.compile(r"^[\x21-\x7e]{1,512}$")
+
+
+def _bearer_token(request: Request) -> Optional[str]:
     header = request.headers.get("authorization", "")
-    if not header.lower().startswith("bearer "):
+    scheme, _, token = header.partition(" ")
+    if scheme.lower() != "bearer":
+        return None
+    token = token.strip()
+    return token or None
+
+
+def _check_wrapper_bearer(request: Request) -> None:
+    """Self-hosted mode only: the gateway's bearer must equal WRAPPER_API_KEY."""
+    provided = _bearer_token(request)
+    if provided is None:
         raise HTTPException(status_code=401, detail="missing bearer token")
-    provided = header.split(" ", 1)[1].strip()
     if not hmac.compare_digest(provided.encode(), _wrapper_api_key().encode()):
         raise HTTPException(status_code=401, detail="invalid bearer token")
 
 
-if not _auth_is_configured():
-    if _allow_no_auth():
-        log.warning("WRAPPER_API_KEY unset and ALLOW_NO_AUTH=true: bearer auth DISABLED (local development only)")
-    else:
-        log.error("WRAPPER_API_KEY unset or placeholder: rail and debug routes return 503")
+def resolve_next_moca_key(request: Request) -> Optional[str]:
+    """The Next Moca key for this request, or None (the request then passes through).
+
+    Never logged, echoed or stored: it lives only in this request's call stack.
+    """
+    if _wrapper_api_key() in _PLACEHOLDER_API_KEYS:
+        raise HTTPException(status_code=503, detail="WRAPPER_API_KEY is the example placeholder")
+    if _self_hosted():
+        _check_wrapper_bearer(request)
+        return nm.api_key() or None
+    token = _bearer_token(request)
+    if token is not None:
+        return token if _FORWARDABLE_TOKEN.match(token) else None
+    if _allow_no_auth():  # local development: no gateway credential, use the service key
+        return nm.api_key() or None
+    return None
+
+
+def require_debug_access(request: Request) -> None:
+    """/debug carries no secrets; in self-hosted mode it still requires the wrapper bearer."""
+    if _wrapper_api_key() in _PLACEHOLDER_API_KEYS:
+        raise HTTPException(status_code=503, detail="WRAPPER_API_KEY is the example placeholder")
+    if _self_hosted():
+        _check_wrapper_bearer(request)
+
+
+log.info("mode: %s", "self-hosted" if _self_hosted() else "forwarded key")
 
 
 @asynccontextmanager
@@ -122,21 +166,22 @@ async def health_check() -> dict[str, str]:
     return {"status": "ok"}
 
 
+async def select_input_route(
+    request: InputGuardrailRequest,
+    next_moca_key: Optional[str] = Depends(resolve_next_moca_key),
+) -> Union[MutateGuardrailResponse, ValidateGuardrailResponse]:
+    return await select_input(request, next_moca_key)
+
+
 RAIL_ROUTES: dict[str, object] = {
-    "/select-input": select_input,
+    "/select-input": select_input_route,
 }
 
 for path, fn in RAIL_ROUTES.items():
-    app.add_api_route(
-        path,
-        endpoint=fn,
-        methods=["POST"],
-        status_code=200,
-        dependencies=[Depends(require_bearer)],
-    )
+    app.add_api_route(path, endpoint=fn, methods=["POST"], status_code=200)
 
 
-@app.get("/debug/loaded-config", dependencies=[Depends(require_bearer)])
+@app.get("/debug/loaded-config", dependencies=[Depends(require_debug_access)])
 async def debug_loaded_config() -> dict:
     """What the running service has loaded. Never returns secret values."""
     try:
@@ -149,15 +194,16 @@ async def debug_loaded_config() -> dict:
             "output": [p for p in RAIL_ROUTES if p.endswith("-output")],
         },
         "next_moca_api_base": base,
+        "mode": "self-hosted" if _self_hosted() else "forwarded key",
         "next_moca_api_key_set": bool(nm.api_key()),
         "defaults": {
             "operating_point": nm.DEFAULT_OPERATING_POINT,
             "max_context_tokens": nm.DEFAULT_MAX_CONTEXT_TOKENS,
-            "min_tokens": nm.DEFAULT_MIN_TOKENS,
+            "min_tokens": {"security operating points": nm.DEFAULT_MIN_TOKENS_SECURITY, "other": nm.DEFAULT_MIN_TOKENS},
             "timeout_ms": nm.DEFAULT_TIMEOUT_MS,
             "validate_only": False,
         },
-        "wrapper_auth_enabled": _auth_is_configured(),
+        "wrapper_auth_enabled": _self_hosted(),
         "wrapper_version": os.environ.get("BUILD_REF", "unknown"),
     }
 
