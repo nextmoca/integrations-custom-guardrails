@@ -110,9 +110,16 @@ async def _select_with(
             return await nm.select_one(client, url=url, key=key, text=text, task_prompt=task_prompt, settings=settings)
 
     tasks = [asyncio.create_task(run(text)) for _, text in slots]
-    _, pending = await asyncio.wait(tasks, timeout=settings.timeout_ms / 1000.0)
-    for task in pending:
-        task.cancel()
+    try:
+        _, pending = await asyncio.wait(tasks, timeout=settings.timeout_ms / 1000.0)
+    finally:
+        # Cancel whatever is still running (deadline reached, or this coroutine was
+        # itself cancelled) and wait for it to unwind, so no task outlives the request.
+        unfinished = [t for t in tasks if not t.done()]
+        for task in unfinished:
+            task.cancel()
+        if unfinished:
+            await asyncio.gather(*unfinished, return_exceptions=True)
     decisions: list[nm.Decision] = []
     for task in tasks:
         if task in pending or task.cancelled():

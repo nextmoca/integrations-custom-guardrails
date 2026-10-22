@@ -104,8 +104,15 @@ app = FastAPI(
 @app.exception_handler(RequestValidationError)
 async def validation_error_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
     """A malformed gateway envelope is an infrastructure error (non-2xx). The body names
-    the failing fields only and never echoes request content."""
-    fields = sorted({".".join(str(p) for p in e.get("loc", ())) for e in exc.errors()})
+    only the top-level envelope fields that failed (requestBody, context, config) and
+    never echoes request content, including dictionary keys below those fields."""
+    envelope = {"requestBody", "context", "config"}
+    fields = sorted(
+        {
+            f"body.{loc[1]}" if len(loc) > 1 and loc[1] in envelope else "body"
+            for loc in (tuple(e.get("loc", ())) for e in exc.errors())
+        }
+    )
     return JSONResponse(status_code=422, content={"error": "invalid guardrail request", "fields": fields})
 
 

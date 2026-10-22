@@ -430,26 +430,37 @@ def test_insecure_base_url_fails_open(client: TestClient, monkeypatch: pytest.Mo
     _assert_passthrough(_post(client, body), body)
 
 
-@respx.mock
-def test_deadline_covers_all_calls_including_queue_time(client: TestClient) -> None:
-    """Twelve slow calls with eight in flight: the request still answers inside timeout_ms."""
+def test_deadline_covers_all_calls_including_queue_time(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Twelve tool results, eight in flight at a time. The first eight answer at once;
+    the four queued behind them never answer. At the deadline those four are cancelled,
+    drained, and keep their original text, while the eight deliveries are applied."""
     import asyncio
     import time
 
-    async def slow(request: httpx.Request) -> httpx.Response:
-        await asyncio.sleep(0.25)
-        return _reply("selected", "engaged")(request)
+    import guardrail._next_moca_client as nm
 
-    respx.post(FAKE_URL).mock(side_effect=slow)
+    cancelled: list[str] = []
+
+    async def fake_select_one(_client: Any, *, text: str, **_kw: Any) -> Any:
+        if int(text.split(" ", 1)[0]) < 8:
+            return nm.Decision(nm.DECISION_APPLIED, "applied", rendered=f"render {text.split(' ', 1)[0]}")
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.05)  # cleanup that takes time: only a drained task gets to record
+            cancelled.append(text.split(" ", 1)[0])
+            raise
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(nm, "select_one", fake_select_one)
     body = _body(*[f"{i} " + BIG for i in range(12)])
     started = time.monotonic()
-    out = _post(client, body, config={"timeout_ms": 400})
-    elapsed = time.monotonic() - started
-    assert elapsed < 1.0
+    out = _post(client, body, config={"timeout_ms": 200})
+    assert time.monotonic() - started < 5.0  # loose watchdog only
     contents = [m["content"] for m in out["result"]["messages"] if m["role"] == "tool"]
-    # The first wave of eight finished and was applied; the queued four hit the deadline and kept their text.
-    assert contents.count("selected") == 8
-    assert sum(c.endswith(BIG) for c in contents) == 4
+    assert contents[:8] == [f"render {i}" for i in range(8)]
+    assert contents[8:] == [f"{i} " + BIG for i in range(8, 12)]
+    assert sorted(cancelled, key=int) == ["8", "9", "10", "11"]  # drained before the response
 
 
 def test_lifespan_opens_one_shared_client(client: TestClient) -> None:
@@ -464,6 +475,18 @@ def test_malformed_envelope_is_422_without_echoing_content(client: TestClient) -
     assert r.status_code == 422
     assert secret_text not in r.text
     assert r.json()["fields"] == ["body.requestBody"]
+
+
+def test_422_does_not_echo_dictionary_keys(client: TestClient) -> None:
+    secret_key = "secret-text-used-as-a-key"
+    r = client.post(
+        "/select-input",
+        headers=AUTH,
+        json={"requestBody": _body(BIG), "context": {"user": CTX["user"], "metadata": {secret_key: {"nested": 1}}}},
+    )
+    assert r.status_code == 422
+    assert secret_key not in r.text
+    assert r.json()["fields"] == ["body.context"]
 
 
 def test_request_body_without_messages_passes_through(client: TestClient) -> None:
