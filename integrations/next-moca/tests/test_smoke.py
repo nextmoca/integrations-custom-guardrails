@@ -35,7 +35,6 @@ def env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("WRAPPER_API_KEY", WRAPPER_KEY)
     monkeypatch.setenv("NEXT_MOCA_API_KEY", "nm-test-key")
     monkeypatch.setenv("NEXT_MOCA_API_BASE", FAKE_BASE)
-    monkeypatch.delenv("ALLOW_NO_AUTH", raising=False)
 
 
 @pytest.fixture(scope="module")
@@ -649,6 +648,125 @@ def test_forwarded_key_never_appears_in_logs_messages_or_errors(
     for record in caplog.records:
         assert CUSTOMER_KEY not in record.getMessage()
         assert CUSTOMER_KEY not in repr(record.args)
+
+
+@pytest.mark.parametrize(
+    "headers,expect_call",
+    [
+        ({"Authorization": f"bearer {CUSTOMER_KEY}"}, True),  # scheme is case-insensitive
+        ({"Authorization": f"Bearer   {CUSTOMER_KEY}  "}, True),  # extra spaces
+        ({"Authorization": "Bearer " + "k" * 513}, False),  # oversized
+        ({"Authorization": "Bearer clé-non-ascii"}, False),  # non-ASCII
+    ],
+)
+@respx.mock
+def test_forwarded_header_edge_cases(client: TestClient, forwarded: None, headers: dict, expect_call: bool) -> None:
+    route = respx.post(FAKE_URL).mock(side_effect=_reply("selected", "engaged"))
+    raw = [(k.encode(), v.encode("utf-8")) for k, v in headers.items()]
+    r = client.post("/select-input", headers=raw, json=_req(_body(BIG)))
+    assert r.status_code == 200 and r.json()["verdict"] is True
+    assert route.called is expect_call
+    if expect_call:
+        assert route.calls.last.request.headers["authorization"] == f"Bearer {CUSTOMER_KEY}"
+
+
+@respx.mock
+def test_duplicate_authorization_headers_count_as_none(client: TestClient, forwarded: None) -> None:
+    route = respx.post(FAKE_URL).mock(side_effect=_reply("selected", "engaged"))
+    raw = [(b"authorization", f"Bearer {CUSTOMER_KEY}".encode()), (b"authorization", b"Bearer other-key-123")]
+    r = client.post("/select-input", headers=raw, json=_req(_body(BIG)))
+    assert r.status_code == 200 and r.json()["transformed"] is False
+    assert not route.called
+
+
+def test_duplicate_authorization_headers_are_401_self_hosted(client: TestClient) -> None:
+    raw = [(b"authorization", f"Bearer {WRAPPER_KEY}".encode()), (b"authorization", f"Bearer {WRAPPER_KEY}".encode())]
+    r = client.post("/select-input", headers=raw, json=_req(_body(BIG)))
+    assert r.status_code == 401
+
+
+@pytest.mark.parametrize("config", [None, {"validate_only": True}])
+@respx.mock
+def test_key_reflected_by_upstream_is_never_logged_returned_or_applied(
+    client: TestClient, forwarded: None, caplog: pytest.LogCaptureFixture, config: dict | None
+) -> None:
+    caplog.set_level(logging.DEBUG)
+
+    def reflect(request: httpx.Request) -> httpx.Response:
+        sent = json.loads(request.content)
+        payload = {
+            "request_id": sent["request_id"],
+            "rendered_context": f"leaked {CUSTOMER_KEY}",
+            "policy_version": CUSTOMER_KEY,
+            "tokens_before": 1, "tokens_after": 1, "tokens_saved": 0,
+            "records_available": 1, "records_selected": 0, "fallback_used": False,
+            "engine_latency_ms": 1.0, "outcome": "sanitized_fallback",
+        }
+        return httpx.Response(200, json=payload, headers={"x-needlepath-selection-id": CUSTOMER_KEY})
+
+    respx.post(FAKE_URL).mock(side_effect=reflect)
+    body = _body(BIG)
+    out = _post_as(client, {"Authorization": f"Bearer {CUSTOMER_KEY}"}, body, config)
+    if config is None:
+        _assert_passthrough(out, body)
+    assert CUSTOMER_KEY not in caplog.text
+
+
+@respx.mock
+def test_reflected_key_in_401_header_and_outcome_is_scrubbed(
+    client: TestClient, forwarded: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    respx.post(FAKE_URL).mock(
+        side_effect=lambda request: httpx.Response(401, headers={"x-needlepath-selection-id": CUSTOMER_KEY})
+    )
+    out = _post_as(client, {"Authorization": f"Bearer {CUSTOMER_KEY}"}, _body(BIG), {"validate_only": True})
+    assert out["message"] == "Next Moca shadow: none:http_401:passthrough"
+    assert CUSTOMER_KEY not in caplog.text
+
+
+def test_forwarded_key_absent_from_real_http_stack_logs(
+    client: TestClient, forwarded: None, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No respx: a loopback server behind the real httpx/httpcore stack, with debug logging on."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    import guardrail._next_moca_client as nm
+
+    seen_auth: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            sent = json.loads(self.rfile.read(int(self.headers["content-length"])))
+            seen_auth.append(self.headers["authorization"])
+            payload = json.dumps({
+                "request_id": sent["request_id"], "rendered_context": "selected passage",
+                "tokens_before": 10, "tokens_after": 5, "tokens_saved": 5, "records_available": 2,
+                "records_selected": 1, "fallback_used": False, "engine_latency_ms": 1.0,
+                "outcome": "engaged", "safety": {"selection_safe": True}, "gate": {"engaged": True},
+            }).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_a: Any) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setattr(nm, "api_base", lambda: f"http://127.0.0.1:{server.server_port}")
+        caplog.set_level(logging.DEBUG)
+        out = _post_as(client, {"Authorization": f"Bearer {CUSTOMER_KEY}"}, _body(BIG))
+    finally:
+        server.shutdown()
+    assert out["transformed"] is True
+    assert seen_auth == [f"Bearer {CUSTOMER_KEY}"]
+    assert any(r.name.startswith("httpcore") for r in caplog.records), "httpcore debug logs must be exercised"
+    assert CUSTOMER_KEY not in caplog.text
 
 
 def test_forwarded_key_never_appears_in_422(client: TestClient, forwarded: None) -> None:

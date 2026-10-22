@@ -31,7 +31,7 @@ Each tool result is handled on its own: when one call fails and another returns 
 
 System, user and assistant messages, `tool_call_id`, and every other field of the request body (`model`, `stream`, `tools`, sampling parameters) are returned unchanged. Requests without tool messages, or without a user message, make no call.
 
-Fail open: any error inside the wrapper or from Next Moca returns `{"verdict": true, "transformed": false, "result": <original requestBody>}`, so the request continues unchanged.
+Fail open: a tool result whose call fails, times out or returns no delivery keeps its original text, and when no tool result received a delivery (or the wrapper itself hits an error) the response is `{"verdict": true, "transformed": false, "result": <original requestBody>}`, so the request continues unchanged.
 
 The gateway resends the full conversation on every turn, so in this version every tool message in the history is sent to Next Moca again on each call.
 
@@ -51,7 +51,7 @@ TrueFoundry also exposes `mcp_tool_pre_invoke` and `mcp_tool_post_invoke` hooks.
 | Where the Next Moca key comes from | the `Authorization: Bearer` header of each gateway call, forwarded to Next Moca for that call only | `NEXT_MOCA_API_KEY` on the service |
 | No usable key | request passes through unchanged, no call | wrong or missing bearer: 401; no `NEXT_MOCA_API_KEY`: passes through unchanged |
 
-In forwarded-key mode the key is never logged, echoed in a response or error, stored, or cached beyond the request. A call without a bearer key never uses a key held by the service. Mint a key at [console.nextmoca.com](https://console.nextmoca.com).
+In forwarded-key mode the key is never logged, echoed in a response or error, stored, or cached beyond the request, and is sent only to the configured `https://` API base. A call without exactly one `Authorization: Bearer` header never uses a key held by the service. For local development, send your development key as the bearer, as the gateway does. Mint a key at [console.nextmoca.com](https://console.nextmoca.com).
 
 ## Configuration
 
@@ -79,8 +79,7 @@ Credentials and the API host are never read from `config`.
 |---|---|---|
 | `WRAPPER_API_KEY` | self-hosted only | Bearer token the gateway sends (Custom Bearer Auth). Set: self-hosted mode. Unset: forwarded-key mode. |
 | `NEXT_MOCA_API_KEY` | self-hosted only | The service's Next Moca key, used only in self-hosted mode. Do not set it on a forwarded-key deployment. |
-| `NEXT_MOCA_API_BASE` | no | Default `https://api.nextmoca.com`. Must be `https://`. |
-| `ALLOW_NO_AUTH` | no | `true` lets a call without any bearer use `NEXT_MOCA_API_KEY` in forwarded-key mode. Local development only. |
+| `NEXT_MOCA_API_BASE` | no | Default `https://api.nextmoca.com`. Must be `https://`; keys are never sent in plaintext. |
 | `LOG_LEVEL` | no | Default `info`. Logs carry decisions, outcomes and selection ids, never message text or keys. |
 
 ## Quick start

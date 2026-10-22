@@ -67,10 +67,6 @@ def _wrapper_api_key() -> str:
     return os.environ.get("WRAPPER_API_KEY", "").strip()
 
 
-def _allow_no_auth() -> bool:
-    return os.environ.get("ALLOW_NO_AUTH", "").strip().lower() in ("1", "true", "yes")
-
-
 def _self_hosted() -> bool:
     """Self-hosted mode: WRAPPER_API_KEY is set to a real value."""
     key = _wrapper_api_key()
@@ -82,8 +78,14 @@ _FORWARDABLE_TOKEN = re.compile(r"^[\x21-\x7e]{1,512}$")
 
 
 def _bearer_token(request: Request) -> Optional[str]:
-    header = request.headers.get("authorization", "")
-    scheme, _, token = header.partition(" ")
+    """The token of exactly one `Authorization: Bearer <token>` header, else None.
+
+    Several Authorization headers are ambiguous and count as none.
+    """
+    values = request.headers.getlist("authorization")
+    if len(values) != 1:
+        return None
+    scheme, _, token = values[0].strip().partition(" ")
     if scheme.lower() != "bearer":
         return None
     token = token.strip()
@@ -109,11 +111,10 @@ def resolve_next_moca_key(request: Request) -> Optional[str]:
     if _self_hosted():
         _check_wrapper_bearer(request)
         return nm.api_key() or None
+    # Forwarded-key mode never falls back to a key held by the service.
     token = _bearer_token(request)
-    if token is not None:
-        return token if _FORWARDABLE_TOKEN.match(token) else None
-    if _allow_no_auth():  # local development: no gateway credential, use the service key
-        return nm.api_key() or None
+    if token is not None and _FORWARDABLE_TOKEN.match(token):
+        return token
     return None
 
 

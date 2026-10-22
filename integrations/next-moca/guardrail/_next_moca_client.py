@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -28,7 +29,6 @@ ENDPOINT_PATH = "/v1/context/select"
 
 ENV_API_KEY = "NEXT_MOCA_API_KEY"
 ENV_API_BASE = "NEXT_MOCA_API_BASE"
-ENV_ALLOW_INSECURE_BASE = "NEXT_MOCA_ALLOW_INSECURE_BASE"
 
 # Response header carrying the server's id for this selection (the receipt id).
 SELECTION_ID_HEADER = "x-needlepath-selection-id"
@@ -149,14 +149,11 @@ def api_key() -> str:
 
 
 def api_base() -> str:
-    """Base URL from the environment. https only, unless explicitly opted out for local testing."""
+    """Base URL from the environment. https only: keys are never sent in plaintext."""
     base = (os.environ.get(ENV_API_BASE, "").strip() or DEFAULT_API_BASE).rstrip("/")
-    scheme = urlparse(base).scheme
-    if scheme == "https":
-        return base
-    if scheme == "http" and os.environ.get(ENV_ALLOW_INSECURE_BASE, "").strip().lower() in ("1", "true", "yes"):
-        return base
-    raise ValueError(f"{ENV_API_BASE} must be an https:// URL")
+    if urlparse(base).scheme != "https":
+        raise ValueError(f"{ENV_API_BASE} must be an https:// URL")
+    return base
 
 
 # ---------------------------------------------------------------------------
@@ -262,8 +259,29 @@ def decide_response(request_id: str, response: Any) -> Decision:
     return Decision(DECISION_APPLIED, "applied", rendered=rendered, outcome=outcome_str)
 
 
-def receipt_of(response: Any) -> dict[str, Any]:
-    """Identity and counts worth logging. Never any text."""
+# Shapes a server-supplied value must have before it is logged or put in a message.
+_SAFE_ID = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+_SAFE_OUTCOME = re.compile(r"^[a-z_]{1,40}$")
+
+
+def safe_id(value: Any, key: str) -> Optional[str]:
+    """A short identifier from the server, or None if it has an unexpected shape or carries the key."""
+    if not isinstance(value, str) or not _SAFE_ID.match(value) or (key and key in value):
+        return None
+    return value
+
+
+def safe_outcome(value: Optional[str], key: str) -> Optional[str]:
+    if value is None:
+        return None
+    if not _SAFE_OUTCOME.match(value) or (key and key in value):
+        return "unrecognized"
+    return value
+
+
+def receipt_of(response: Any, key: str = "") -> dict[str, Any]:
+    """Identity and counts worth logging. Never any text: numbers and booleans as sent,
+    strings only when they are short identifiers that do not carry the key."""
     if not isinstance(response, dict):
         return {}
     keys = (
@@ -277,7 +295,18 @@ def receipt_of(response: Any) -> dict[str, Any]:
         "tokens_saved",
         "engine_latency_ms",
     )
-    return {k: response[k] for k in keys if k in response}
+    out: dict[str, Any] = {}
+    for k in keys:
+        if k not in response:
+            continue
+        v = response[k]
+        if isinstance(v, (bool, int, float)) or v is None:
+            out[k] = v
+        else:
+            cleaned = safe_id(v, key)
+            if cleaned is not None:
+                out[k] = cleaned
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +342,7 @@ async def select_one(
     except Exception as exc:  # noqa: BLE001 - fail open on any transport error
         return Decision(DECISION_PASSTHROUGH, f"transport_error:{type(exc).__name__}")
 
-    selection_id = resp.headers.get(SELECTION_ID_HEADER)
+    selection_id = safe_id(resp.headers.get(SELECTION_ID_HEADER), key)
     if resp.status_code < 200 or resp.status_code >= 300:
         return Decision(DECISION_PASSTHROUGH, f"http_{resp.status_code}", selection_id=selection_id)
     try:
@@ -322,6 +351,10 @@ async def select_one(
         return Decision(DECISION_PASSTHROUGH, "malformed_response:not_json", selection_id=selection_id)
 
     decision = decide_response(request_id, payload)
+    if decision.applied and key and key in (decision.rendered or ""):
+        # Never put a credential into the model's context, whatever the server sent.
+        decision = Decision(DECISION_PASSTHROUGH, "malformed_response:credential_in_render")
+    decision.outcome = safe_outcome(decision.outcome, key)
     decision.selection_id = selection_id
-    decision.receipt = receipt_of(payload)
+    decision.receipt = receipt_of(payload, key)
     return decision
