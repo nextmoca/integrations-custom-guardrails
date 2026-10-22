@@ -260,13 +260,13 @@ def decide_response(request_id: str, response: Any) -> Decision:
 
 
 # Shapes a server-supplied value must have before it is logged or put in a message.
-_SAFE_ID = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
-_SAFE_OUTCOME = re.compile(r"^[a-z_]{1,40}$")
+_SAFE_ID = re.compile(r"[A-Za-z0-9._:-]{1,64}")
+_SAFE_OUTCOME = re.compile(r"[a-z_]{1,40}")
 
 
 def safe_id(value: Any, key: str) -> Optional[str]:
     """A short identifier from the server, or None if it has an unexpected shape or carries the key."""
-    if not isinstance(value, str) or not _SAFE_ID.match(value) or (key and key in value):
+    if not isinstance(value, str) or not _SAFE_ID.fullmatch(value) or (key and key in value):
         return None
     return value
 
@@ -274,7 +274,7 @@ def safe_id(value: Any, key: str) -> Optional[str]:
 def safe_outcome(value: Optional[str], key: str) -> Optional[str]:
     if value is None:
         return None
-    if not _SAFE_OUTCOME.match(value) or (key and key in value):
+    if not _SAFE_OUTCOME.fullmatch(value) or (key and key in value):
         return "unrecognized"
     return value
 

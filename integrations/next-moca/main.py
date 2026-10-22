@@ -59,6 +59,11 @@ logging.basicConfig(
 )
 log = logging.getLogger("next-moca-guardrails-tfy")
 
+# The HTTP client libraries log request lines and full response headers at INFO and
+# DEBUG, before any of our scrubbing runs. Keep them at WARNING whatever LOG_LEVEL is.
+for _noisy in ("httpx", "httpcore"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 # Placeholder shipped in .env.example; never accepted as a real key.
 _PLACEHOLDER_API_KEYS = frozenset({"change-me-to-a-random-string"})
 
@@ -74,7 +79,7 @@ def _self_hosted() -> bool:
 
 
 # A bearer token that can be forwarded: printable ASCII, no spaces, bounded length.
-_FORWARDABLE_TOKEN = re.compile(r"^[\x21-\x7e]{1,512}$")
+_FORWARDABLE_TOKEN = re.compile(r"[\x21-\x7e]{1,512}")
 
 
 def _bearer_token(request: Request) -> Optional[str]:
@@ -113,7 +118,7 @@ def resolve_next_moca_key(request: Request) -> Optional[str]:
         return nm.api_key() or None
     # Forwarded-key mode never falls back to a key held by the service.
     token = _bearer_token(request)
-    if token is not None and _FORWARDABLE_TOKEN.match(token):
+    if token is not None and _FORWARDABLE_TOKEN.fullmatch(token):
         return token
     return None
 

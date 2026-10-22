@@ -728,7 +728,8 @@ def test_reflected_key_in_401_header_and_outcome_is_scrubbed(
 def test_forwarded_key_absent_from_real_http_stack_logs(
     client: TestClient, forwarded: None, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No respx: a loopback server behind the real httpx/httpcore stack, with debug logging on."""
+    """No respx: a loopback server behind the real httpx/httpcore stack, with debug logging on.
+    The server reflects the key in a response header and in the reason phrase."""
     import threading
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -746,8 +747,10 @@ def test_forwarded_key_absent_from_real_http_stack_logs(
                 "records_selected": 1, "fallback_used": False, "engine_latency_ms": 1.0,
                 "outcome": "engaged", "safety": {"selection_safe": True}, "gate": {"engaged": True},
             }).encode()
-            self.send_response(200)
+            self.send_response(200, f"OK {CUSTOMER_KEY}")
             self.send_header("content-type", "application/json")
+            self.send_header("x-needlepath-selection-id", CUSTOMER_KEY)
+            self.send_header("x-echo", CUSTOMER_KEY)
             self.send_header("content-length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
@@ -760,13 +763,23 @@ def test_forwarded_key_absent_from_real_http_stack_logs(
     try:
         monkeypatch.setattr(nm, "api_base", lambda: f"http://127.0.0.1:{server.server_port}")
         caplog.set_level(logging.DEBUG)
-        out = _post_as(client, {"Authorization": f"Bearer {CUSTOMER_KEY}"}, _body(BIG))
+        out = _post_as(client, {"Authorization": f"Bearer {CUSTOMER_KEY}"}, _body(BIG), {"validate_only": True})
     finally:
         server.shutdown()
-    assert out["transformed"] is True
-    assert seen_auth == [f"Bearer {CUSTOMER_KEY}"]
-    assert any(r.name.startswith("httpcore") for r in caplog.records), "httpcore debug logs must be exercised"
+    assert seen_auth == [f"Bearer {CUSTOMER_KEY}"]  # the real stack did send it
+    assert out["message"] == "Next Moca shadow: none:engaged:would_apply"
+    assert caplog.records
     assert CUSTOMER_KEY not in caplog.text
+    for record in caplog.records:
+        assert CUSTOMER_KEY not in record.getMessage()
+
+
+@pytest.mark.parametrize("bad", ["sel-1\n", "engaged\n", "x" * 65, "a b"])
+def test_safe_values_reject_newlines_and_odd_shapes(bad: str) -> None:
+    import guardrail._next_moca_client as nm
+
+    assert nm.safe_id(bad, CUSTOMER_KEY) is None
+    assert nm.safe_outcome(bad, CUSTOMER_KEY) == "unrecognized"
 
 
 def test_forwarded_key_never_appears_in_422(client: TestClient, forwarded: None) -> None:
