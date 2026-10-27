@@ -36,11 +36,11 @@ SELECTION_ID_HEADER = "x-needlepath-selection-id"
 USER_AGENT = "next-moca-truefoundry-guardrail/1.0.0"
 
 # Defaults for the fields read from the gateway's `config`.
-DEFAULT_OPERATING_POINT = "np-2026-10-r7"
+DEFAULT_OPERATING_POINT = "np-2026-10-r8"
 DEFAULT_MAX_CONTEXT_TOKENS = 4000
 DEFAULT_MIN_TOKENS = 1500
 DEFAULT_MIN_TOKENS_SECURITY = 0  # on a security operating point every tool result is sent
-SECURITY_OPERATING_POINTS = frozenset({"np-2026-10-r7"})
+SECURITY_OPERATING_POINTS = frozenset({"np-2026-10-r7", "np-2026-10-r8"})
 SECURITY_OPERATING_POINT_SUFFIX = "r7s-candidate"
 DEFAULT_TIMEOUT_MS = 3000
 

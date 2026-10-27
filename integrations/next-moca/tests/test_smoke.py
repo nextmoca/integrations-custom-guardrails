@@ -149,7 +149,7 @@ def test_debug_loaded_config(client: TestClient) -> None:
     body = r.json()
     assert body["routes"] == {"input": ["/select-input"], "output": []}
     assert body["next_moca_api_key_set"] is True
-    assert body["defaults"]["operating_point"] == "np-2026-10-r7"
+    assert body["defaults"]["operating_point"] == "np-2026-10-r8"
     assert body["defaults"]["min_tokens"] == {"security operating points": 0, "other": 1500}
     assert body["mode"] == "self-hosted"
     assert body["defaults"]["timeout_ms"] == 3000
@@ -264,11 +264,11 @@ def test_outbound_request_shape(client: TestClient) -> None:
 
 
 @respx.mock
-def test_default_operating_point_is_r7(client: TestClient) -> None:
+def test_default_operating_point_is_r8(client: TestClient) -> None:
     route = respx.post(FAKE_URL).mock(side_effect=_reply("x", "engaged"))
     _post(client, _body(BIG))
     sent = json.loads(route.calls.last.request.content)
-    assert sent["budget"]["operating_point"] == "np-2026-10-r7"
+    assert sent["budget"]["operating_point"] == "np-2026-10-r8"
 
 
 @respx.mock
@@ -304,11 +304,11 @@ def test_min_tokens_default_is_1500_off_security_points(client: TestClient) -> N
     assert route.call_count == 1
 
 
-@pytest.mark.parametrize("label", ["np-2026-10-r7", "np-2026-11-r7s-candidate", "np-2026-10-r7s-candidate"])
+@pytest.mark.parametrize("label", ["np-2026-10-r8", "np-2026-10-r7", "np-2026-11-r7s-candidate", "np-2026-10-r7s-candidate"])
 @respx.mock
 def test_min_tokens_default_is_0_on_security_points(client: TestClient, label: str) -> None:
     route = respx.post(FAKE_URL).mock(side_effect=_reply("x", "engaged"))
-    config = None if label == "np-2026-10-r7" else {"operating_point": label}  # r7 is also the default
+    config = None if label == "np-2026-10-r8" else {"operating_point": label}  # r8 is also the default
     out = _post(client, _body("short tool result"), config=config)
     assert route.called
     assert json.loads(route.calls.last.request.content)["budget"]["operating_point"] == label
@@ -319,7 +319,7 @@ def test_min_tokens_default_is_0_on_security_points(client: TestClient, label: s
 def test_explicit_min_tokens_always_wins(client: TestClient) -> None:
     route = respx.post(FAKE_URL).mock(side_effect=_reply("x", "engaged"))
     body = _body("short tool result")
-    _assert_passthrough(_post(client, body, config={"operating_point": "np-2026-10-r7", "min_tokens": 1500}), body)
+    _assert_passthrough(_post(client, body, config={"operating_point": "np-2026-10-r8", "min_tokens": 1500}), body)
     assert not route.called
     out = _post(client, _body("short tool result"), config={"operating_point": "np-2026-10-r6", "min_tokens": 0})
     assert route.called
